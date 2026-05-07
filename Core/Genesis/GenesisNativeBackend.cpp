@@ -793,6 +793,8 @@ bool GenesisNativeBackend::LoadRom(const vector<uint8_t>& romData, const char* r
 {
 	if(romData.empty()) return false;
 
+	EnsureCpuRamTraceOpen();
+
 	// --- Store ROM ---
 	_rom = romData;
 
@@ -924,6 +926,8 @@ bool GenesisNativeBackend::LoadRom(const vector<uint8_t>& romData, const char* r
 
 void GenesisNativeBackend::RunFrame()
 {
+	EnsureCpuRamTraceOpen();
+
 	// 6-button pads reset to 3-button mode if TH pulses stop for ~25 scanlines.
 	// (25 * ~63.5us ≈ 1.5ms on NTSC). This must be scanline-based, not frame-based.
 
