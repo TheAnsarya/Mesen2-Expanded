@@ -170,14 +170,19 @@ namespace {
 
 	static bool TryParseEnvU32(const char* name, uint32_t minVal, uint32_t maxVal, uint32_t& outVal)
 	{
-		const char* raw = std::getenv(name);
-		if(!raw || !*raw) {
+		char* raw = nullptr;
+		size_t rawLen = 0;
+		if(_dupenv_s(&raw, &rawLen, name) != 0 || !raw || !*raw) {
+			if(raw) {
+				free(raw);
+			}
 			return false;
 		}
 
 		char* end = nullptr;
 		unsigned long v = std::strtoul(raw, &end, 10);
 		bool ok = (end != raw && *end == '\0' && v >= minVal && v <= maxVal);
+		free(raw);
 		if(!ok) return false;
 
 		outVal = (uint32_t)v;

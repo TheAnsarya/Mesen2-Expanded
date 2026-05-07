@@ -263,9 +263,22 @@ namespace
 
 	static constexpr const char* kCpuRamTraceDirectory = "reference";
 	static constexpr const char* kCpuRamTracePath = "reference/cpu_ram_trace.log";
+	static constexpr const char* kGenesisStartupTracePath = "reference/genesis_startup_trace.log";
 	static FILE* sCpuRamTraceFile = nullptr;
+	static FILE* sGenesisStartupTraceFile = nullptr;
 	static uint32_t sCpuRamTraceLines = 0;
+	static uint32_t sGenesisStartupTraceLines = 0;
 	static bool sCpuRamTraceConfigLoaded = false;
+	static bool sGenesisStartupTraceConfigLoaded = false;
+	static std::string sGenesisStartupTracePath = kGenesisStartupTracePath;
+	static bool sGenesisStartupTraceEnabled = false;
+	static uint32_t sGenesisStartupTraceFrameEnd = 600u;
+	static uint32_t sGenesisStartupTraceMaxLines = 300000u;
+	static uint32_t sGenesisStartupCheckpointIntervalFrames = 1u;
+	static uint32_t sGenesisStartupNextCheckpointFrame = 0u;
+	static bool sGenesisStartupHasLastDisplayState = false;
+	static bool sGenesisStartupLastDisplayEnabled = false;
+	static uint32_t sGenesisStartupDisplayTransitionCount = 0u;
 	static uint32_t kCpuRamTraceFrameStart = 0u;
 	static uint32_t kCpuRamTraceFrameEnd = 50u;
 	static uint32_t kCpuRamTraceAddrStart = 0xFFCC00u;
@@ -274,17 +287,49 @@ namespace
 
 	static bool TryParseEnvU32AutoBase(const char* name, uint32_t minVal, uint32_t maxVal, uint32_t& outVal)
 	{
-		const char* raw = std::getenv(name);
-		if(!raw || !*raw) {
+		char* raw = nullptr;
+		size_t rawLen = 0;
+		if(_dupenv_s(&raw, &rawLen, name) != 0 || !raw || !*raw) {
+			if(raw) {
+				free(raw);
+			}
 			return false;
 		}
 
 		char* end = nullptr;
 		unsigned long v = std::strtoul(raw, &end, 0);
 		bool ok = (end != raw && *end == '\0' && v >= minVal && v <= maxVal);
+		free(raw);
 		if(!ok) return false;
 		outVal = (uint32_t)v;
 		return true;
+	}
+
+	static bool TryGetTracePathFromEnv(const char* name, std::string& outPath)
+	{
+		char* raw = nullptr;
+		size_t rawLen = 0;
+		if(_dupenv_s(&raw, &rawLen, name) != 0 || !raw || !*raw) {
+			if(raw) {
+				free(raw);
+			}
+			return false;
+		}
+
+		outPath = raw;
+		free(raw);
+		return !outPath.empty();
+	}
+
+	static void EnsureTraceDirectoryForPath(const std::string& path)
+	{
+		std::error_code fsErr;
+		std::filesystem::path p(path);
+		if(p.has_parent_path()) {
+			std::filesystem::create_directories(p.parent_path(), fsErr);
+		} else {
+			std::filesystem::create_directories(kCpuRamTraceDirectory, fsErr);
+		}
 	}
 
 	static void LoadCpuRamTraceConfigFromEnv()
@@ -307,19 +352,50 @@ namespace
 		}
 	}
 
+	static void LoadGenesisStartupTraceConfigFromEnv()
+	{
+		if(sGenesisStartupTraceConfigLoaded) return;
+		sGenesisStartupTraceConfigLoaded = true;
+
+		uint32_t v = 0;
+		if(TryParseEnvU32AutoBase("MESEN_GENESIS_STARTUP_TRACE", 0u, 1u, v)) sGenesisStartupTraceEnabled = v != 0u;
+		if(TryParseEnvU32AutoBase("MESEN_GENESIS_STARTUP_TRACE_FRAME_END", 0u, 0xFFFFFFFFu, v)) sGenesisStartupTraceFrameEnd = v;
+		if(TryParseEnvU32AutoBase("MESEN_GENESIS_STARTUP_TRACE_MAX_LINES", 1u, 0xFFFFFFFFu, v)) sGenesisStartupTraceMaxLines = v;
+		if(TryParseEnvU32AutoBase("MESEN_GENESIS_STARTUP_CHECKPOINT_INTERVAL_FRAMES", 1u, 120u, v)) sGenesisStartupCheckpointIntervalFrames = v;
+		TryGetTracePathFromEnv("MESEN_GENESIS_STARTUP_TRACE_PATH", sGenesisStartupTracePath);
+	}
+
 	static void EnsureCpuRamTraceOpen()
 	{
 		if(sCpuRamTraceFile) return;
 		LoadCpuRamTraceConfigFromEnv();
-		std::error_code fsErr;
-		std::filesystem::create_directories(kCpuRamTraceDirectory, fsErr);
-		sCpuRamTraceFile = fopen(kCpuRamTracePath, "w");
+		EnsureTraceDirectoryForPath(kCpuRamTracePath);
+		fopen_s(&sCpuRamTraceFile, kCpuRamTracePath, "w");
 		if(sCpuRamTraceFile) {
 			fprintf(sCpuRamTraceFile, "# CPU work-RAM write trace\n");
 			fprintf(sCpuRamTraceFile, "# frameRange=%u-%u addrRange=%06X-%06X maxLines=%u\n",
 				kCpuRamTraceFrameStart, kCpuRamTraceFrameEnd,
 				(unsigned)kCpuRamTraceAddrStart, (unsigned)kCpuRamTraceAddrEnd, kCpuRamTraceMaxLines);
 			fflush(sCpuRamTraceFile);
+		}
+	}
+
+	static void EnsureGenesisStartupTraceOpen()
+	{
+		if(sGenesisStartupTraceFile) return;
+		LoadGenesisStartupTraceConfigFromEnv();
+		if(!sGenesisStartupTraceEnabled) return;
+
+		EnsureTraceDirectoryForPath(sGenesisStartupTracePath);
+		fopen_s(&sGenesisStartupTraceFile, sGenesisStartupTracePath.c_str(), "w");
+		if(sGenesisStartupTraceFile) {
+			fprintf(sGenesisStartupTraceFile, "# GENESIS startup trace\n");
+			fprintf(sGenesisStartupTraceFile, "# tracePath=%s frameEnd=%u maxLines=%u checkpointInterval=%u\n",
+				sGenesisStartupTracePath.c_str(),
+				sGenesisStartupTraceFrameEnd,
+				sGenesisStartupTraceMaxLines,
+				sGenesisStartupCheckpointIntervalFrames);
+			fflush(sGenesisStartupTraceFile);
 		}
 	}
 
@@ -341,6 +417,56 @@ namespace
 		sCpuRamTraceLines++;
 		if((sCpuRamTraceLines & 0x3FFu) == 0u) {
 			fflush(sCpuRamTraceFile);
+		}
+	}
+
+	static bool GenesisStartupTraceShouldLog(uint32_t frame)
+	{
+		EnsureGenesisStartupTraceOpen();
+		if(!sGenesisStartupTraceFile) return false;
+		if(sGenesisStartupTraceLines >= sGenesisStartupTraceMaxLines) return false;
+		if(frame > sGenesisStartupTraceFrameEnd) return false;
+		return true;
+	}
+
+	static void GenesisStartupTraceLog(uint32_t frame, uint16_t line, const char* eventTag, uint32_t addr, uint16_t data, uint32_t aux, uint32_t pc, uint64_t mclk)
+	{
+		if(!sGenesisStartupTraceFile) return;
+		fprintf(sGenesisStartupTraceFile,
+			"F%04u L%03u %s addr=%06X data=%04X aux=%u pc=%06X mclk=%llu\n",
+			(unsigned)frame,
+			(unsigned)line,
+			eventTag,
+			(unsigned)addr,
+			(unsigned)data,
+			(unsigned)aux,
+			(unsigned)pc,
+			(unsigned long long)mclk);
+		sGenesisStartupTraceLines++;
+		if((sGenesisStartupTraceLines & 0x3FFu) == 0u) {
+			fflush(sGenesisStartupTraceFile);
+		}
+	}
+
+	static void GenesisStartupTraceEmitFrameMarkers(uint32_t frame, uint16_t line, uint16_t modeSet2, uint32_t pc, uint64_t mclk)
+	{
+		if(!GenesisStartupTraceShouldLog(frame)) {
+			return;
+		}
+
+		bool displayEnabled = (modeSet2 & 0x0040u) != 0u;
+		if(!sGenesisStartupHasLastDisplayState) {
+			sGenesisStartupHasLastDisplayState = true;
+			sGenesisStartupLastDisplayEnabled = displayEnabled;
+		} else if(displayEnabled != sGenesisStartupLastDisplayEnabled) {
+			sGenesisStartupLastDisplayEnabled = displayEnabled;
+			sGenesisStartupDisplayTransitionCount++;
+			GenesisStartupTraceLog(frame, line, "VDP_DISP_TGL", 0xC00004u, modeSet2, sGenesisStartupDisplayTransitionCount, pc, mclk);
+		}
+
+		if(frame >= sGenesisStartupNextCheckpointFrame) {
+			GenesisStartupTraceLog(frame, line, "STARTUP_CHECKPOINT", 0xC00004u, modeSet2, sGenesisStartupDisplayTransitionCount, pc, mclk);
+			sGenesisStartupNextCheckpointFrame = frame + sGenesisStartupCheckpointIntervalFrames;
 		}
 	}
 }
@@ -927,6 +1053,7 @@ bool GenesisNativeBackend::LoadRom(const vector<uint8_t>& romData, const char* r
 void GenesisNativeBackend::RunFrame()
 {
 	EnsureCpuRamTraceOpen();
+	EnsureGenesisStartupTraceOpen();
 
 	// 6-button pads reset to 3-button mode if TH pulses stop for ~25 scanlines.
 	// (25 * ~63.5us ≈ 1.5ms on NTSC). This must be scanline-based, not frame-based.
@@ -948,6 +1075,7 @@ void GenesisNativeBackend::RunFrame()
 	_diag68kSliceOverrunCount = 0;
 	_diag68kMaxSliceOverrun = 0;
 	_diagFrameCounter++;
+	GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp.GetRegister(1), _cpu.GetState().PC, _masterClock);
 	while(frameMclkDone < frameMclk) {
 		uint32_t sliceStartMclk = frameMclkDone;
 
@@ -995,6 +1123,7 @@ void GenesisNativeBackend::RunFrame()
 		// expose those interrupts to the CPU for the next instruction boundary.
 		_vdp.AdvanceToMclk(nextEvent);
 		DeliverPendingVdpInterrupts();
+		GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp.GetRegister(1), _cpu.GetState().PC, _masterClock);
 
 		frameMclkDone = nextEvent;
 
