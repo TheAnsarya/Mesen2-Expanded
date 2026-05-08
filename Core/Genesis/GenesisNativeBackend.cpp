@@ -279,11 +279,38 @@ namespace
 	static bool sGenesisStartupHasLastDisplayState = false;
 	static bool sGenesisStartupLastDisplayEnabled = false;
 	static uint32_t sGenesisStartupDisplayTransitionCount = 0u;
+	static bool sGenesisStartupHasLastZ80RunState = false;
+	static bool sGenesisStartupLastZ80Running = false;
+	static bool sGenesisStartupHasLastZ80BusReqState = false;
+	static bool sGenesisStartupLastZ80BusReq = false;
+	static bool sGenesisStartupHasLastZ80ResetState = false;
+	static bool sGenesisStartupLastZ80Reset = false;
+	static bool sGenesisStartupHasLastVdpRegs = false;
+	static uint8_t sGenesisStartupLastVdpRegs[24] = {};
+	static uint16_t sGenesisStartupLastVdpStatus = 0u;
+	static uint8_t sGenesisTmssWriteWindow[4] = {};
 	static uint32_t kCpuRamTraceFrameStart = 0u;
 	static uint32_t kCpuRamTraceFrameEnd = 50u;
 	static uint32_t kCpuRamTraceAddrStart = 0xFFCC00u;
 	static uint32_t kCpuRamTraceAddrEnd = 0xFFCFFFu;
 	static uint32_t kCpuRamTraceMaxLines = 300000u;
+
+	static uint16_t ComputeGenesisStartupPaletteDigest(const uint8_t* cram)
+	{
+		if(!cram) {
+			return 0u;
+		}
+
+		uint16_t digest = 0x4D47u;
+		for(uint32_t i = 0; i < 16u; i++) {
+			uint16_t color = (uint16_t)cram[i * 2u] | (uint16_t)(cram[i * 2u + 1u] << 8);
+			digest = (uint16_t)((digest << 3) | (digest >> 13));
+			digest ^= color;
+			digest = (uint16_t)(digest * 33u + (uint16_t)i);
+		}
+
+		return digest;
+	}
 
 	static bool TryParseEnvU32AutoBase(const char* name, uint32_t minVal, uint32_t maxVal, uint32_t& outVal)
 	{
@@ -478,11 +505,13 @@ namespace
 		fflush(sGenesisStartupTraceFile);
 	}
 
-	static void GenesisStartupTraceEmitFrameMarkers(uint32_t frame, uint16_t line, uint16_t modeSet2, uint32_t pc, uint64_t mclk)
+	static void GenesisStartupTraceEmitFrameMarkers(uint32_t frame, uint16_t line, GenesisVdp& vdp, bool z80Running, bool z80BusReq, bool z80Reset, bool z80BusAck, uint32_t pc, uint64_t mclk)
 	{
 		if(!GenesisStartupTraceShouldLog(frame)) {
 			return;
 		}
+
+		uint16_t modeSet2 = vdp.GetRegister(1);
 
 		bool displayEnabled = (modeSet2 & 0x0040u) != 0u;
 		if(!sGenesisStartupHasLastDisplayState) {
@@ -494,7 +523,57 @@ namespace
 			GenesisStartupTraceLog(frame, line, "VDP_DISP_TGL", 0xC00004u, modeSet2, sGenesisStartupDisplayTransitionCount, pc, mclk);
 		}
 
+		if(!sGenesisStartupHasLastZ80RunState) {
+			sGenesisStartupHasLastZ80RunState = true;
+			sGenesisStartupLastZ80Running = z80Running;
+		} else if(z80Running != sGenesisStartupLastZ80Running) {
+			sGenesisStartupLastZ80Running = z80Running;
+			GenesisStartupTraceLog(frame, line, "Z80_RUN_TGL", 0xA11100u, z80Running ? 1u : 0u, z80BusAck ? 1u : 0u, pc, mclk);
+		}
+
+		if(!sGenesisStartupHasLastZ80BusReqState) {
+			sGenesisStartupHasLastZ80BusReqState = true;
+			sGenesisStartupLastZ80BusReq = z80BusReq;
+		} else if(z80BusReq != sGenesisStartupLastZ80BusReq) {
+			sGenesisStartupLastZ80BusReq = z80BusReq;
+			GenesisStartupTraceLog(frame, line, "Z80_BUSREQ", 0xA11100u, z80BusReq ? 1u : 0u, z80BusAck ? 1u : 0u, pc, mclk);
+		}
+
+		if(!sGenesisStartupHasLastZ80ResetState) {
+			sGenesisStartupHasLastZ80ResetState = true;
+			sGenesisStartupLastZ80Reset = z80Reset;
+		} else if(z80Reset != sGenesisStartupLastZ80Reset) {
+			sGenesisStartupLastZ80Reset = z80Reset;
+			GenesisStartupTraceLog(frame, line, "Z80_RESET", 0xA11200u, z80Reset ? 1u : 0u, z80BusReq ? 1u : 0u, pc, mclk);
+		}
+
+		uint8_t regs[24] = {};
+		vdp.GetRegisters(regs);
+		uint16_t status = vdp.GetStatus();
+		if(!sGenesisStartupHasLastVdpRegs) {
+			sGenesisStartupHasLastVdpRegs = true;
+			memcpy(sGenesisStartupLastVdpRegs, regs, sizeof(sGenesisStartupLastVdpRegs));
+			sGenesisStartupLastVdpStatus = status;
+		} else {
+			for(uint32_t i = 0u; i < 24u; i++) {
+				if(sGenesisStartupLastVdpRegs[i] != regs[i]) {
+					uint16_t packed = (uint16_t)(((uint16_t)sGenesisStartupLastVdpRegs[i] << 8) | regs[i]);
+					GenesisStartupTraceLog(frame, line, "VDP_REG_W", 0xC00004u, packed, i, pc, mclk);
+					sGenesisStartupLastVdpRegs[i] = regs[i];
+				}
+			}
+
+			if(sGenesisStartupLastVdpStatus != status) {
+				GenesisStartupTraceLog(frame, line, "VDP_STAT_W", 0xC00004u, status, (uint32_t)(sGenesisStartupLastVdpStatus ^ status), pc, mclk);
+				sGenesisStartupLastVdpStatus = status;
+			}
+		}
+
 		if(frame >= sGenesisStartupNextCheckpointFrame) {
+			uint16_t palDigest = ComputeGenesisStartupPaletteDigest(vdp.Cram());
+			GenesisStartupTraceLog(frame, line, "STARTUP_PAL", 0xC00000u, palDigest, modeSet2, pc, mclk);
+			GenesisStartupTraceLog(frame, line, "STARTUP_VDP", 0xC00004u, status, (uint32_t)(regs[0] | ((uint16_t)regs[1] << 8)), pc, mclk);
+			GenesisStartupTraceLog(frame, line, "STARTUP_Z80", 0xA11100u, (uint16_t)((z80BusReq ? 1u : 0u) | (z80Reset ? 2u : 0u) | (z80BusAck ? 4u : 0u) | (z80Running ? 8u : 0u)), sGenesisStartupDisplayTransitionCount, pc, mclk);
 			GenesisStartupTraceLog(frame, line, "STARTUP_CHECKPOINT", 0xC00004u, modeSet2, sGenesisStartupDisplayTransitionCount, pc, mclk);
 			sGenesisStartupNextCheckpointFrame = frame + sGenesisStartupCheckpointIntervalFrames;
 		}
@@ -951,6 +1030,20 @@ bool GenesisNativeBackend::LoadRom(const vector<uint8_t>& romData, const char* r
 
 	EnsureCpuRamTraceOpen();
 	EnsureGenesisStartupTraceOpen();
+	sGenesisStartupNextCheckpointFrame = 0u;
+	sGenesisStartupHasLastDisplayState = false;
+	sGenesisStartupLastDisplayEnabled = false;
+	sGenesisStartupDisplayTransitionCount = 0u;
+	sGenesisStartupHasLastZ80RunState = false;
+	sGenesisStartupLastZ80Running = false;
+	sGenesisStartupHasLastZ80BusReqState = false;
+	sGenesisStartupLastZ80BusReq = false;
+	sGenesisStartupHasLastZ80ResetState = false;
+	sGenesisStartupLastZ80Reset = false;
+	sGenesisStartupHasLastVdpRegs = false;
+	memset(sGenesisStartupLastVdpRegs, 0, sizeof(sGenesisStartupLastVdpRegs));
+	sGenesisStartupLastVdpStatus = 0u;
+	memset(sGenesisTmssWriteWindow, 0, sizeof(sGenesisTmssWriteWindow));
 	CpuRamTraceBootstrapLog(0u, _masterClock);
 	GenesisStartupTraceBootstrapLog(0u, _masterClock);
 
@@ -1108,7 +1201,7 @@ void GenesisNativeBackend::RunFrame()
 	_diag68kSliceOverrunCount = 0;
 	_diag68kMaxSliceOverrun = 0;
 	_diagFrameCounter++;
-	GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp.GetRegister(1), _cpu.GetState().PC, _masterClock);
+	GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp, (_z80Reset && !_z80BusAck && _z80ResumeDelayMclk == 0u), _z80BusRequest, _z80Reset, _z80BusAck, _cpu.GetState().PC, _masterClock);
 	while(frameMclkDone < frameMclk) {
 		uint32_t sliceStartMclk = frameMclkDone;
 
@@ -1156,7 +1249,7 @@ void GenesisNativeBackend::RunFrame()
 		// expose those interrupts to the CPU for the next instruction boundary.
 		_vdp.AdvanceToMclk(nextEvent);
 		DeliverPendingVdpInterrupts();
-		GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp.GetRegister(1), _cpu.GetState().PC, _masterClock);
+		GenesisStartupTraceEmitFrameMarkers(_diagFrameCounter, _vdp.GetScanline(), _vdp, (_z80Reset && !_z80BusAck && _z80ResumeDelayMclk == 0u), _z80BusRequest, _z80Reset, _z80BusAck, _cpu.GetState().PC, _masterClock);
 
 		frameMclkDone = nextEvent;
 
@@ -1993,7 +2086,15 @@ void GenesisNativeBackend::WriteCartBus(uint32_t address, uint8_t value)
 
 		case BusRegion::Tmss:
 			// $A14000–$A14003: games write "SEGA" here as a TMSS unlock.
-			// We don't enforce TMSS; silently accept the write.
+			// We don't enforce TMSS; still emit unlock telemetry for startup parity validation.
+			if((address & 0xFFFFFCu) == 0xA14000u) {
+				sGenesisTmssWriteWindow[address & 0x03u] = value;
+				if(sGenesisTmssWriteWindow[0] == 'S' && sGenesisTmssWriteWindow[1] == 'E' && sGenesisTmssWriteWindow[2] == 'G' && sGenesisTmssWriteWindow[3] == 'A') {
+					if(GenesisStartupTraceShouldLog(_diagFrameCounter)) {
+						GenesisStartupTraceLog(_diagFrameCounter, _vdp.GetScanline(), "TMSS_UNLOCK", 0xA14000u, 0x5345u, 0x4741u, _cpu.GetState().PC, _masterClock);
+					}
+				}
+			}
 			return;
 
 		case BusRegion::TmssCart:
