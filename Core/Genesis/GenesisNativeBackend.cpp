@@ -420,6 +420,20 @@ namespace
 		}
 	}
 
+	static void CpuRamTraceBootstrapLog(uint32_t pc, uint64_t mclk)
+	{
+		if(!sCpuRamTraceFile) return;
+		fprintf(sCpuRamTraceFile, "F%04u L%03u WRAM_BOOT addr=%06X data=%02X pc=%06X mclk=%llu\n",
+			0u,
+			0u,
+			0u,
+			0u,
+			(unsigned)pc,
+			(unsigned long long)mclk);
+		sCpuRamTraceLines++;
+		fflush(sCpuRamTraceFile);
+	}
+
 	static bool GenesisStartupTraceShouldLog(uint32_t frame)
 	{
 		EnsureGenesisStartupTraceOpen();
@@ -446,6 +460,22 @@ namespace
 		if((sGenesisStartupTraceLines & 0x3FFu) == 0u) {
 			fflush(sGenesisStartupTraceFile);
 		}
+	}
+
+	static void GenesisStartupTraceBootstrapLog(uint32_t pc, uint64_t mclk)
+	{
+		if(!sGenesisStartupTraceFile) return;
+		fprintf(sGenesisStartupTraceFile,
+			"F%04u L%03u STARTUP_BOOT addr=%06X data=%04X aux=%u pc=%06X mclk=%llu\n",
+			0u,
+			0u,
+			0u,
+			0u,
+			0u,
+			(unsigned)pc,
+			(unsigned long long)mclk);
+		sGenesisStartupTraceLines++;
+		fflush(sGenesisStartupTraceFile);
 	}
 
 	static void GenesisStartupTraceEmitFrameMarkers(uint32_t frame, uint16_t line, uint16_t modeSet2, uint32_t pc, uint64_t mclk)
@@ -920,6 +950,9 @@ bool GenesisNativeBackend::LoadRom(const vector<uint8_t>& romData, const char* r
 	if(romData.empty()) return false;
 
 	EnsureCpuRamTraceOpen();
+	EnsureGenesisStartupTraceOpen();
+	CpuRamTraceBootstrapLog(0u, _masterClock);
+	GenesisStartupTraceBootstrapLog(0u, _masterClock);
 
 	// --- Store ROM ---
 	_rom = romData;
